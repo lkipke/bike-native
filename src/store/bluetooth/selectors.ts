@@ -7,3 +7,5 @@ export let getAvailableDeviceIds = (state: RootState) =>
   Object.keys(state.bluetooth.devicesById);
 
 export let getDevicesById = (state: RootState) => state.bluetooth.devicesById;
+
+export let getCurrentStats = (state: RootState) => state.bluetooth.currentStats;

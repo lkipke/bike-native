@@ -1,187 +1,116 @@
-import {useCallback, useEffect, useRef, useState} from 'react';
-import {BleError, BleManager, Device, State} from 'react-native-ble-plx';
-import {useDispatch, useSelector} from 'react-redux';
-import {from, fromEvent, Observable} from 'rxjs';
-import {map, switchMap} from 'rxjs/operators';
+import {useCallback, useEffect, useRef} from 'react';
+import {
+  BleError,
+  BleManager,
+  Characteristic,
+  Device,
+  State,
+} from 'react-native-ble-plx';
+import {useDispatch} from 'react-redux';
+import {decode} from 'base64-arraybuffer';
 
 import {AppDispatch} from '../store';
-import {DeviceId, getSelectedDeviceId} from '../store/bluetooth';
+import {BluetoothData} from './types';
 
 // UUIDs for BLE devices
-const FITNESS_MACHINE_FEATURE_UUID = '00002acc-0000-1000-8000-00805f9b34fb';
-const INDOOR_BIKE_DATA_UUID = '00002ad2-0000-1000-8000-00805f9b34fb';
+const FITNESS_MACHINE_FEATURE_UUID = '1826';
+const INDOOR_BIKE_DATA_UUID = '2ad2';
 
-let useBluetoothManager = () => {
-  let manager = useRef<BleManager | null>(null);
+const getEpoch = () => Math.round(Date.now() / 1000);
 
-  useEffect(() => {
-    // TODO: figure out what to do to restore background state, if needed
-    let instance = new BleManager({
-      restoreStateIdentifier: 'bike-bluetooth-manager',
-      restoreStateFunction: (restoredState) => {
-        console.log(restoredState);
-      },
-    });
-    manager.current = instance;
+function parseBikeData(
+  input: [BleError | null, Characteristic | null],
+): BluetoothData | undefined {
+  let [error, characteristic] = input;
+  if (error || !characteristic?.value) {
+    return;
+  }
 
-    return () => {
-      instance.destroy();
-    };
-  }, []);
-
-  return manager;
-};
+  let data = new DataView(decode(characteristic.value));
+  return {
+    flags: data.getUint16(0, true).toString(2),
+    speed: data.getUint16(2, true) / 100,
+    cadence: data.getUint16(4, true) / 2,
+    power: data.getInt16(6, true),
+    heartRate: data.getUint8(8),
+    time: getEpoch(),
+  };
+}
 
 let useBluetooth = () => {
-  // Redux store
-  let selectedDeviceId = useSelector(getSelectedDeviceId);
+  let manager = useRef<BleManager | null>(null);
+  let bikeDevice = useRef<Device | null>(null);
   let dispatch = useDispatch<AppDispatch>();
-
-  let manager = useBluetoothManager();
-  let connectedDeviceId = useRef<DeviceId | null>();
-  let [connectionState, setConnectionState] = useState<State>(State.Unknown);
 
   let deviceScanCallback = useCallback(
     (error: BleError | null, device: Device | null) => {
-      if (error) {
-        console.error('Error scanning for devices', error);
+      if (error || !device) {
         return;
       }
 
-      if (device && device.id && device.name) {
-        // add the device info to redux so we can display it
-        dispatch({
-          type: 'bluetooth/addAvailableDevice',
-          device: {id: device.id, name: device.name},
-        });
+      if (device.name === 'IC Bike') {
+        manager.current?.stopDeviceScan();
+
+        device
+          .connect()
+          .then((connectedDevice) =>
+            connectedDevice.discoverAllServicesAndCharacteristics(),
+          )
+          .then((connectedDevice) => {
+            bikeDevice.current = connectedDevice;
+            dispatch({
+              type: 'bluetooth/toggleConnected',
+              isConnected: true,
+            });
+
+            let startTime = Date.now();
+            connectedDevice.monitorCharacteristicForService(
+              FITNESS_MACHINE_FEATURE_UUID,
+              INDOOR_BIKE_DATA_UUID,
+              (...args) => {
+                let time = Date.now();
+
+                // throttle to every 1 second
+                if (time - startTime >= 1000) {
+                  startTime = time;
+                  let data = parseBikeData(args);
+                  if (data) {
+                    dispatch({
+                      type: 'bluetooth/addStats',
+                      stats: data,
+                    });
+                  }
+                }
+              },
+            );
+          })
+          .catch((connectionError) =>
+            console.error(
+              'error connecting with device',
+              device,
+              connectionError,
+            ),
+          );
       }
     },
     [dispatch],
   );
 
-  // Wait for the bluetooth manager to be powered on
+  // Create the manager
   useEffect(() => {
-    let sub = manager.current?.onStateChange((state) => {
+    let instance = new BleManager();
+    manager.current = instance;
+    let subscription = manager.current.onStateChange((state) => {
       if (state === State.PoweredOn) {
         manager.current?.startDeviceScan(null, null, deviceScanCallback);
-
-        // don't endlessly look for devices
-        // TODO: allow for refresh
-        setTimeout(() => {
-          manager.current?.stopDeviceScan();
-        }, 10000);
-
-        sub?.remove();
+        subscription.remove();
       }
     });
-  }, [manager, deviceScanCallback]);
 
-  useEffect(() => {
-    if (connectionState === State.PoweredOn) {
-      manager.current?.startDeviceScan(null, null, deviceScanCallback);
-
-      // don't endlessly look for devices
-      // TODO: allow for refresh
-      setTimeout(() => {
-        manager.current?.stopDeviceScan();
-      }, 10000);
-    }
-  }, [manager, deviceScanCallback]);
-
-  useEffect(() => {
-    if (!selectedDeviceId) {
-      return;
-    }
-
-    // cancel a previous connection, if it had one
-    if (selectedDeviceId !== connectedDeviceId.current) {
-      if (connectedDeviceId.current) {
-        console.log('cancelling previous connection');
-        manager.current?.cancelDeviceConnection(connectedDeviceId.current);
-      }
-      connectedDeviceId.current = selectedDeviceId;
-    }
-
-    console.log('found selected device id', selectedDeviceId);
-
-    manager.current
-      ?.connectToDevice(selectedDeviceId)
-      .then((device) => {
-        console.log('connected!');
-        return device.discoverAllServicesAndCharacteristics();
-      })
-      .then((device) => {
-        console.log(
-          'device service data',
-          device.localName,
-          device.name,
-          device.serviceUUIDs,
-          device.overflowServiceUUIDs,
-        );
-
-        device.monitorCharacteristicForService(
-          FITNESS_MACHINE_FEATURE_UUID,
-          INDOOR_BIKE_DATA_UUID,
-        );
-        // device.readCharacteristicForService('fitness_machine', )
-        // console.log(device.)
-      })
-      .catch((error) => {
-        console.error('ERROR', error);
-      });
-  }, [manager, selectedDeviceId, dispatch]);
+    return () => {
+      instance.destroy();
+    };
+  }, [deviceScanCallback]);
 };
 
 export {useBluetooth};
-
-// const getEpoch = () => Math.round(Date.now() / 1000);
-
-// const observe = async (serviceId, characteristicId) => {
-//     let options = {
-//         filters: [{ services: [serviceId] }],
-//     };
-//     const device = await navigator.bluetooth.requestDevice(options);
-//     const server = await device.gatt.connect();
-//     const service = await server.getPrimaryService(serviceId);
-//     const characteristic = await service.getCharacteristic(characteristicId);
-
-//      await characteristic.startNotifications();
-//      return fromEvent(characteristic, 'characteristicvaluechanged');
-// };
-
-// const parseBikeData = (value) => {
-//     const result = {};
-
-//     result.flags = value.getUint16(0, true).toString(2);
-//     result.speed = value.getUint16(2, true) / 100;
-//     result.cadence = value.getUint16(4, true) / 2;
-//     result.power = value.getInt16(6, true);
-//     result.heartRate = value.getUint8(8, true);
-//     result.time = getEpoch();
-
-//     return result;
-// };
-
-// export const connect = () => {
-//     // random data for debugging
-//     if (true) {
-//         const rnd = (max) => Math.floor(Math.random() * Math.floor(max));
-//         return new Observable((subject) => {
-//             setInterval(() => {
-//                 subject.next({
-//                     speed: rnd(20),
-//                     cadence: rnd(100),
-//                     power: rnd(400),
-//                     heartRate: rnd(180),
-//                     time: getEpoch(),
-//                 });
-//             }, 200);
-//         });
-//     }
-
-//     return from(observe('fitness_machine', 'indoor_bike_data')).pipe(
-//         switchMap((sub) => sub),
-//         map((e) => e.target.value),
-//         map((raw) => parseBikeData(raw))
-//     );
-// };
