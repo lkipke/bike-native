@@ -1,5 +1,5 @@
 import React from 'react';
-import {StyleSheet, Text, View} from 'react-native';
+import {FlatList, ListRenderItem, StyleSheet, Text, View} from 'react-native';
 import {ListItem} from 'react-native-elements';
 import Icon from 'react-native-vector-icons/Feather';
 import {useDispatch, useSelector} from 'react-redux';
@@ -11,19 +11,20 @@ import {
 } from '../../store/bluetooth';
 import {useBluetooth} from '../Bluetooth';
 
-let SelectableListItem: React.FC<{id: string}> = ({id}) => {
+let SelectableListItem: ListRenderItem<string> = ({item}) => {
   let dispatch = useDispatch<AppDispatch>();
   let devicesById = useSelector(getDevicesById);
   let selectedDeviceId = useSelector(getSelectedDeviceId);
 
-  let isConnected = id === selectedDeviceId;
-  let device = devicesById[id];
+  let isConnected = item === selectedDeviceId;
+  let device = devicesById[item];
 
   return (
     <ListItem
       topDivider
       bottomDivider
       onPress={() => {
+        console.log('setting device id', device.id);
         dispatch({
           type: 'bluetooth/setSelectedDeviceId',
           deviceId: isConnected ? null : device.id,
@@ -49,10 +50,11 @@ let BluetoothDeviceList = () => {
     <View style={styles.container}>
       <Text style={styles.header}>Available devices</Text>
       <View style={styles.list}>
-        {deviceIds.length === 0 && <Text>No devices found</Text>}
-        {deviceIds.map((id) => (
-          <SelectableListItem key={id} id={id} />
-        ))}
+        {deviceIds.length === 0 ? (
+          <Text>No devices found</Text>
+        ) : (
+          <FlatList renderItem={SelectableListItem} data={deviceIds} />
+        )}
       </View>
     </View>
   );

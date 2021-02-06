@@ -8,39 +8,38 @@ import {AppDispatch} from '../store';
 import {DeviceId, getSelectedDeviceId} from '../store/bluetooth';
 
 // UUIDs for BLE devices
-// const FITNESS_MACHINE_FEATURE_UUID = '00002acc-0000-1000-8000-00805f9b34fb';
-// const INDOOR_BIKE_DATA_UUID = '00002ad2-0000-1000-8000-00805f9b34fb';
+const FITNESS_MACHINE_FEATURE_UUID = '00002acc-0000-1000-8000-00805f9b34fb';
+const INDOOR_BIKE_DATA_UUID = '00002ad2-0000-1000-8000-00805f9b34fb';
+
+let useBluetoothManager = () => {
+  let manager = useRef<BleManager | null>(null);
+
+  useEffect(() => {
+    // TODO: figure out what to do to restore background state, if needed
+    let instance = new BleManager({
+      restoreStateIdentifier: 'bike-bluetooth-manager',
+      restoreStateFunction: (restoredState) => {
+        console.log(restoredState);
+      },
+    });
+    manager.current = instance;
+
+    return () => {
+      instance.destroy();
+    };
+  }, []);
+
+  return manager;
+};
 
 let useBluetooth = () => {
   // Redux store
   let selectedDeviceId = useSelector(getSelectedDeviceId);
   let dispatch = useDispatch<AppDispatch>();
 
-  // BLE Manager
-  let manager = useRef<BleManager | null>(null);
-  let devices = useRef<Record<DeviceId, Device>>({});
+  let manager = useBluetoothManager();
+  let connectedDeviceId = useRef<DeviceId | null>();
   let [connectionState, setConnectionState] = useState<State>(State.Unknown);
-
-  useEffect(() => {
-    // TODO: figure out what to do to restore background state, if needed
-    manager.current = new BleManager({
-      restoreStateIdentifier: 'bike-bluetooth-manager',
-      restoreStateFunction: (restoredState) => {
-        console.log(restoredState);
-      },
-    });
-
-    let sub = manager.current.onStateChange((state) => {
-      setConnectionState(state);
-      sub.remove();
-    });
-
-    // destroy the instance when this component unmounts
-    return () => {
-      setConnectionState(State.Unknown);
-      manager.current?.destroy();
-    };
-  }, []);
 
   let deviceScanCallback = useCallback(
     (error: BleError | null, device: Device | null) => {
@@ -60,45 +59,77 @@ let useBluetooth = () => {
     [dispatch],
   );
 
+  // Wait for the bluetooth manager to be powered on
   useEffect(() => {
-    console.log('connection state change', connectionState);
-    if (connectionState === State.PoweredOn && manager.current) {
-      console.log('starting scan');
+    let sub = manager.current?.onStateChange((state) => {
+      if (state === State.PoweredOn) {
+        manager.current?.startDeviceScan(null, null, deviceScanCallback);
 
-      manager.current.startDeviceScan(null, null, deviceScanCallback);
+        // don't endlessly look for devices
+        // TODO: allow for refresh
+        setTimeout(() => {
+          manager.current?.stopDeviceScan();
+        }, 10000);
+
+        sub?.remove();
+      }
+    });
+  }, [manager, deviceScanCallback]);
+
+  useEffect(() => {
+    if (connectionState === State.PoweredOn) {
+      manager.current?.startDeviceScan(null, null, deviceScanCallback);
 
       // don't endlessly look for devices
       // TODO: allow for refresh
       setTimeout(() => {
         manager.current?.stopDeviceScan();
-      }, 20000);
+      }, 10000);
     }
-  }, [connectionState, deviceScanCallback]);
+  }, [manager, deviceScanCallback]);
 
   useEffect(() => {
-    if (selectedDeviceId) {
-      let device = devices.current[selectedDeviceId];
-      if (device) {
-        device
-          .connect()
-          .then((connected) => {
-            return connected.discoverAllServicesAndCharacteristics();
-          })
-          .then((characteristics) => {
-            console.log('characteristics', characteristics);
-          })
-          .catch((error) => {
-            console.error('ERROR', error);
-          });
-      } else {
-        // remove any devices that we don't have a reference for
-        dispatch({
-          type: 'bluetooth/removeAvailableDevice',
-          deviceId: selectedDeviceId,
-        });
-      }
+    if (!selectedDeviceId) {
+      return;
     }
-  }, [selectedDeviceId, dispatch]);
+
+    // cancel a previous connection, if it had one
+    if (selectedDeviceId !== connectedDeviceId.current) {
+      if (connectedDeviceId.current) {
+        console.log('cancelling previous connection');
+        manager.current?.cancelDeviceConnection(connectedDeviceId.current);
+      }
+      connectedDeviceId.current = selectedDeviceId;
+    }
+
+    console.log('found selected device id', selectedDeviceId);
+
+    manager.current
+      ?.connectToDevice(selectedDeviceId)
+      .then((device) => {
+        console.log('connected!');
+        return device.discoverAllServicesAndCharacteristics();
+      })
+      .then((device) => {
+        console.log(
+          'device service data',
+          device.localName,
+          device.name,
+          device.serviceUUIDs,
+          device.overflowServiceUUIDs,
+        );
+
+        device.monitorCharacteristicForService(
+          FITNESS_MACHINE_FEATURE_UUID,
+          INDOOR_BIKE_DATA_UUID,
+        );
+        // device.readCharacteristicForService('fitness_machine', )
+        // console.log(device.)
+      })
+      .catch((error) => {
+        console.error('ERROR', error);
+      });
+  }, [manager, selectedDeviceId, dispatch]);
 };
 
 export {useBluetooth};
@@ -114,8 +145,8 @@ export {useBluetooth};
 //     const service = await server.getPrimaryService(serviceId);
 //     const characteristic = await service.getCharacteristic(characteristicId);
 
-// await characteristic.startNotifications();
-// return fromEvent(characteristic, 'characteristicvaluechanged');
+//      await characteristic.startNotifications();
+//      return fromEvent(characteristic, 'characteristicvaluechanged');
 // };
 
 // const parseBikeData = (value) => {
